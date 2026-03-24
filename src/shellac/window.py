@@ -6,6 +6,7 @@ import threading
 import time
 from typing import Any, Callable, Dict, Optional, Union
 
+import urllib3
 import uvicorn
 from fastapi import FastAPI
 from fastapi.responses import HTMLResponse
@@ -18,6 +19,8 @@ from .models import WindowConfig, Event
 from .launcher import BrowserLauncher
 
 RemoteConnection._conn_pool_size = 20
+urllib3.connectionpool.HTTPConnectionPool.default_maxsize = 20
+urllib3.connectionpool.HTTPSConnectionPool.default_maxsize = 20
 
 class Window:
     """
@@ -152,7 +155,7 @@ class Window:
                             
                 except Exception:
                     pass
-            time.sleep(0.05)
+            time.sleep(0.2)
             
     def bind(self, name_or_target: Union[str, Any] = None, target: Optional[Any] = None):
         """
