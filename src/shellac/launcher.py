@@ -95,7 +95,7 @@ class BrowserLauncher:
         driver = None
 
         # --- CHROMIUM BASED BROWSERS (Chrome, Edge, Brave, etc.) ---
-        if browser in ["Browser.Chrome", "Browser.Edge", "Browser.Chromium", "Browser.Brave", "Browser.Vivaldi"] or any(b in str(browser) for b in ["Chrome", "Edge"]):
+        if browser in [Browser.Chrome, Browser.Edge, Browser.Chromium, Browser.Brave, Browser.Vivaldi]:
             is_edge = "Edge" in str(browser)
             options = webdriver.EdgeOptions() if is_edge else webdriver.ChromeOptions()
             
@@ -125,7 +125,7 @@ class BrowserLauncher:
                 driver = webdriver.Chrome(options=options, service=service)
 
         # --- FIREFOX ---
-        elif "Firefox" in str(browser):
+        elif browser == Browser.Firefox:
             profile_path = cls.prepare_firefox_profile(config) 
 
             options = webdriver.FirefoxOptions()
@@ -146,9 +146,6 @@ class BrowserLauncher:
             driver.set_window_size(config.width, config.height)
 
         if driver:
-            # APPLY THE POOL FIX
-            # This prevents the 'Connection pool is full' warnings 
-            # caused by multi-threaded polling.
             cls._patch_driver_pool(driver, size=20)
             return driver
 
