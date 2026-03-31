@@ -3,6 +3,7 @@ import shutil
 import tempfile
 from pathlib import Path
 from typing import Optional
+import os
 
 from selenium import webdriver
 from selenium.webdriver.firefox.service import Service as FirefoxService
