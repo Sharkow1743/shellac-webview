@@ -85,68 +85,70 @@ class BrowserLauncher:
                 
                 # Clear the current pool to force it to re-initialize with new settings
                 executor._conn.clear()
-        except Exception as e:
-            # We fail silently or log as this is a 'nice-to-have' optimization
-            print(f"[WebUI] Warning: Could not patch connection pool: {e}")
+        except Exception:
+            pass
 
     @classmethod
-    def create_driver(cls, browser: "Browser", url: str, config: "WindowConfig") -> webdriver.Remote:
+    def create_driver(cls, browser: Browser, url: str, config: WindowConfig) -> webdriver.Remote:
         path = cls.get_path(browser)
         driver = None
+        
+        # Determine Data Directory (Persistent vs Temporary)
+        user_data_path = config.data_dir
+        if user_data_path:
+            user_data_path = str(Path(user_data_path).absolute())
+            if not os.path.exists(user_data_path):
+                os.makedirs(user_data_path, exist_ok=True)
+        else:
+            user_data_path = tempfile.mkdtemp(prefix="shellac_")
 
-        # --- CHROMIUM BASED BROWSERS (Chrome, Edge, Brave, etc.) ---
         if browser in [Browser.Chrome, Browser.Edge, Browser.Chromium, Browser.Brave, Browser.Vivaldi]:
             is_edge = "Edge" in str(browser)
             options = webdriver.EdgeOptions() if is_edge else webdriver.ChromeOptions()
             
-            if path: 
-                options.binary_location = path
+            if path: options.binary_location = path
             
-            # UI Tweaks
             if config.hide_controls:
                 options.add_argument(f"--app={url}")
             
-            # Security and Stability
             options.add_argument("--disable-web-security")
             options.add_argument("--allow-running-insecure-content") 
-            options.add_argument("--disable-site-isolation-trials")
-            options.add_argument(f"--user-data-dir={tempfile.mkdtemp()}") 
-            options.add_argument(f"--window-size={config.width},{config.height}")
+            # Use the data_dir here
+            options.add_argument(f"--user-data-dir={user_data_path}") 
             
-            # Remove "Chrome is being controlled by automated software" infobar
+            if config.start_maximized:
+                options.add_argument("--start-maximized")
+            else:
+                options.add_argument(f"--window-size={config.width},{config.height}")
+            
             options.add_experimental_option("excludeSwitches", ["enable-automation"])
             
-            # Initialize Driver
             if is_edge:
-                service = EdgeService()
-                driver = webdriver.Edge(options=options, service=service)
+                driver = webdriver.Edge(options=options, service=EdgeService())
             else:
-                service = ChromeService()
-                driver = webdriver.Chrome(options=options, service=service)
+                driver = webdriver.Chrome(options=options, service=ChromeService())
 
-        # --- FIREFOX ---
         elif browser == Browser.Firefox:
-            profile_path = cls.prepare_firefox_profile(config) 
-
+            # For Firefox, if data_dir is custom, we point the profile there
             options = webdriver.FirefoxOptions()
-            if path: 
-                options.binary_location = path
+            if path: options.binary_location = path
             
-            options.add_argument("-profile")
-            options.add_argument(profile_path)
+            if config.data_dir:
+                # Use existing profile path
+                options.add_argument("-profile")
+                options.add_argument(user_data_path)
+            else:
+                # Create temporary optimized profile
+                profile_path = cls.prepare_firefox_profile(config) 
+                options.add_argument("-profile")
+                options.add_argument(profile_path)
 
-            if config.kiosk:
-                options.add_argument("--kiosk")
-
-            options.set_preference("security.csp.enable", False)
-                
-            service = FirefoxService()
-            driver = webdriver.Firefox(service=service, options=options)
-            # Firefox handles initial window sizing better via command after launch
-            driver.set_window_size(config.width, config.height)
+            if config.kiosk: options.add_argument("--kiosk")
+            
+            driver = webdriver.Firefox(service=FirefoxService(), options=options)
+            if not config.start_maximized:
+                driver.set_window_size(config.width, config.height)
 
         if driver:
             cls._patch_driver_pool(driver, size=20)
             return driver
-
-        raise ValueError(f"Unsupported browser: {browser}")

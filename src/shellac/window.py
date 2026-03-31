@@ -296,6 +296,55 @@ class Window:
             bool: True if running, False otherwise.
         """
         return self._running
+    
+    def get_url(self) -> str:
+        """Returns the current URL of the browser."""
+        return self.driver.current_url if self.driver else ""
+
+    def reload(self):
+        """Reloads the current page."""
+        if self.driver:
+            self.driver.refresh()
+
+    def maximize(self):
+        """Maximizes the window."""
+        if self.driver:
+            self.driver.maximize_window()
+
+    def minimize(self):
+        """Minimizes the window."""
+        if self.driver:
+            self.driver.minimize_window()
+
+    def get_size(self) -> Dict[str, int]:
+        """Returns the current window dimensions."""
+        if self.driver:
+            return self.driver.get_window_size()
+        return {"width": self.config.width, "height": self.config.height}
+
+    def set_always_on_top(self, enabled: bool = True):
+        """Note: Selenium doesn't support this natively across all OS, 
+        but we can execute a script or suggest using a wrapper."""
+        print("[Shellac] Always-on-top is not natively supported by Selenium drivers.")
+
+    def run_js_async(self, script: str):
+        """Executes JavaScript without waiting for a return value."""
+        if self.driver:
+            self.driver.execute_script(script)
+
+    def set_position(self, x: int, y: int):
+        """Moves the window to the specified coordinates."""
+        if self.driver:
+            self.driver.set_window_position(x, y)
+
+    def get_position(self) -> Dict[str, int]:
+        """Returns the window position."""
+        return self.driver.get_window_position() if self.driver else {"x": 0, "y": 0}
+
+    # Example of a new developer-friendly alert helper
+    def alert(self, message: str):
+        """Shows a native browser alert."""
+        self.run_js(f"alert({json.dumps(message)});")
 
     def show(self, content: str, browser: Browser = Browser.AnyBrowser):
         """
