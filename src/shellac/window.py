@@ -5,6 +5,7 @@ import socket
 import threading
 import time
 from typing import Any, Callable, Dict, Optional, Union
+import asyncio
 
 import urllib3
 import uvicorn
@@ -96,17 +97,21 @@ class Window:
                         bind_name = f"{prefix}.{name}" if prefix else name
                         self.bindings[bind_name] = attr
 
-    def _bridge_monitor(self):  
-        """Internal background thread that polls the JS bridge for incoming calls."""
+    def _bridge_monitor(self):
+        import asyncio
+        from shellac.models import Event
+
         while self._running:
             if self.driver:
                 try:
+                    # 1. Check if the bridge is initialized in the browser
                     exists = self.driver.execute_script(
                         "return (typeof window.webui !== 'undefined' && typeof window._webui_resolve !== 'undefined');"
                     )
                     if not exists:
                         self.driver.execute_script(self._get_bridge_js())
                     
+                    # 2. Collect pending calls from the JavaScript queue
                     events = self.driver.execute_script("""
                         var e = window._webui_queue; 
                         window._webui_queue = []; 
@@ -121,36 +126,58 @@ class Window:
                         if fn_name in self.bindings:
                             cb = self.bindings[fn_name]
                             
+                            # 3. Inspect the Python function signature
                             sig = inspect.signature(cb)
                             params = list(sig.parameters.values())
                             
-                            wants_event = any(p.annotation is Event for p in params) or \
-                                          (params and params[0].name == 'event')
+                            # Determine if the function wants the Shellac 'Event' object
+                            wants_event = False
+                            if params:
+                                # We check if 1st arg is named 'event' or typed as 'Event'
+                                is_event_type = params[0].annotation is Event
+                                is_event_name = params[0].name == 'event'
+                                wants_event = is_event_type or is_event_name
 
                             try:
+                                # 4. Prepare the execution call
                                 if wants_event:
                                     event_obj = Event(window=self, element=fn_name, data=js_args)
-                                    
-                                    expects_extra_args = len(params) > 1 or any(
-                                        p.kind == inspect.Parameter.VAR_POSITIONAL for p in params
-                                    )
-
-                                    if expects_extra_args:
-                                        result = cb(event_obj, *js_args)
+                                    # If function only takes (event), don't unpack JS args
+                                    if len(params) == 1:
+                                        target_args = (event_obj,)
                                     else:
-                                        result = cb(event_obj)
+                                        target_args = (event_obj, *js_args)
                                 else:
-                                    result = cb(*js_args)
+                                    # Standard function: just pass the JS arguments
+                                    target_args = tuple(js_args)
+
+                                # 5. Execute (Handle Async vs Sync)
+                                if inspect.iscoroutinefunction(cb):
+                                    # Run async function in a temporary event loop
+                                    result = asyncio.run(cb(*target_args))
+                                else:
+                                    # Run standard function
+                                    result = cb(*target_args)
                                 
+                                # 6. Return the result to JavaScript
                                 result_json = json.dumps(result)
                                 self.driver.execute_script(f"window._webui_resolve({call_id}, {result_json});")
                                 
                             except Exception as e:
+                                # Log the error for the developer
+                                print(f"[Shellac Error] Call to '{fn_name}' failed: {e}")
+                                import traceback
+                                traceback.print_exc()
+                                
+                                # Inform JS that the call failed
                                 self.driver.execute_script(f"window._webui_resolve({call_id}, null);")
                             
                 except Exception:
+                    # Catch broad driver/poll errors silently to keep the thread alive
                     pass
-            time.sleep(0.2)
+            
+            # Polling frequency (50ms is good for UI responsiveness)
+            time.sleep(0.1)
             
     def bind(self, name_or_target: Union[str, Any] = None, target: Optional[Any] = None):
         """
@@ -269,35 +296,6 @@ class Window:
             bool: True if running, False otherwise.
         """
         return self._running
-
-    def _bridge_monitor(self):  
-        """Internal background thread that polls the JS bridge for incoming calls."""
-        while self._running:
-            if self.driver:
-                try:
-                    exists = self.driver.execute_script("return (typeof window.webui !== 'undefined' && typeof window._webui_resolve !== 'undefined');")
-                    if not exists:
-                        self.driver.execute_script(self._get_bridge_js())
-                    
-                    events = self.driver.execute_script("""
-                        var e = window._webui_queue; 
-                        window._webui_queue = []; 
-                        return e;
-                    """)
-                    
-                    for event_data in (events or []):
-                        fn = event_data.get('fn')
-                        call_id = event_data.get('id')
-                        if fn in self.bindings:
-                            event = Event(window=self, element=fn, data=event_data.get('args', []))
-                            cb = self.bindings[fn]
-                            result = cb(event)
-                            result_json = json.dumps(result)
-                            self.driver.execute_script(f"window._webui_resolve({call_id}, {result_json});")
-                            
-                except Exception:
-                    pass
-            time.sleep(0.05) 
 
     def show(self, content: str, browser: Browser = Browser.AnyBrowser):
         """
