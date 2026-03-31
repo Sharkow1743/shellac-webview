@@ -1,4 +1,4 @@
-from typing import Any, List
+from typing import Any, List, Optional
 from pydantic import BaseModel, Field, ConfigDict
 
 class WindowConfig(BaseModel):
@@ -6,6 +6,8 @@ class WindowConfig(BaseModel):
     height: int = 800
     hide_controls: bool = True 
     kiosk: bool = False
+    data_dir: Optional[str] = None
+    start_maximized: bool = False
 
 class Event(BaseModel):
     model_config = ConfigDict(arbitrary_types_allowed=True)
