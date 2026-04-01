@@ -102,7 +102,7 @@ class Window:
         from shellac.models import Event
 
         while self._running:
-            if self.driver:
+            if self.driver is not None:
                 try:
                     # 1. Check if the bridge is initialized in the browser
                     exists = self.driver.execute_script(
@@ -226,7 +226,7 @@ class Window:
             url_or_html (str): A web URL (http://...), a path to a .html file, 
                 or a raw HTML string.
         """
-        if not self.driver:
+        if self.driver is None:
             return
             
         is_url = url_or_html.startswith(('http://', 'https://', 'file://'))
@@ -254,7 +254,7 @@ class Window:
         Returns:
             Any: The result returned by the JavaScript execution.
         """
-        if self.driver:
+        if self.driver is not None:
             try: return self.driver.execute_script(script)
             except Exception as e: print(f"[WebUI] JS Execution Error: {e}")
         return None
@@ -262,7 +262,7 @@ class Window:
     def close(self):
         """Closes the browser window and shuts down the backend server."""
         self._running = False
-        if self.driver:
+        if self.driver is not None:
             try: self.driver.quit()
             except Exception: pass
             self.driver = None
@@ -277,7 +277,7 @@ class Window:
         """
         self.config.width = width
         self.config.height = height
-        if self.driver: self.driver.set_window_size(width, height)
+        if self.driver is not None: self.driver.set_window_size(width, height)
 
     def set_title(self, title: str):
         """
@@ -303,22 +303,22 @@ class Window:
 
     def reload(self):
         """Reloads the current page."""
-        if self.driver:
+        if self.driver is not None:
             self.driver.refresh()
 
     def maximize(self):
         """Maximizes the window."""
-        if self.driver:
+        if self.driver is not None:
             self.driver.maximize_window()
 
     def minimize(self):
         """Minimizes the window."""
-        if self.driver:
+        if self.driver is not None:
             self.driver.minimize_window()
 
     def get_size(self) -> Dict[str, int]:
         """Returns the current window dimensions."""
-        if self.driver:
+        if self.driver is not None:
             return self.driver.get_window_size()
         return {"width": self.config.width, "height": self.config.height}
 
@@ -329,12 +329,12 @@ class Window:
 
     def run_js_async(self, script: str):
         """Executes JavaScript without waiting for a return value."""
-        if self.driver:
+        if self.driver is not None:
             self.driver.execute_script(script)
 
     def set_position(self, x: int, y: int):
         """Moves the window to the specified coordinates."""
-        if self.driver:
+        if self.driver is not None:
             self.driver.set_window_position(x, y)
 
     def get_position(self) -> Dict[str, int]:
@@ -388,7 +388,7 @@ class Window:
         """
         try:
             while self._running:
-                if self.driver:
+                if self.driver is not None:
                     try:
                         _ = self.driver.window_handles
                     except (NoSuchWindowException, WebDriverException):

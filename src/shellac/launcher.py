@@ -6,9 +6,10 @@ from pathlib import Path
 from typing import Optional
 
 from selenium import webdriver
-from selenium.webdriver.firefox.service import Service as FirefoxService
-from selenium.webdriver.edge.service import Service as EdgeService
-from selenium.webdriver.chrome.service import Service as ChromeService
+from selenium.webdriver.firefox.options import Options as FirefoxOptions
+
+import undetected_chromedriver as uc
+from undetected_geckodriver import Firefox as UCFirefox
 
 from .enums import Browser
 from .models import WindowConfig
@@ -81,56 +82,58 @@ class BrowserLauncher:
         else:
             user_data_path = tempfile.mkdtemp(prefix="shellac_")
 
-        # --- CHROMIUM (Chrome, Edge, etc.) ---
-        if browser in [Browser.Chrome, Browser.Edge, Browser.Chromium, Browser.Brave, Browser.Vivaldi]:
-            is_edge = "Edge" in str(browser)
-            options = webdriver.EdgeOptions() if is_edge else webdriver.ChromeOptions()
+        driver = None
+
+        # --- CHROMIUM (Chrome, Edge, Brave, Vivaldi) ---
+        if browser in[Browser.Chrome, Browser.Edge, Browser.Chromium, Browser.Brave, Browser.Vivaldi]:
             
-            if path: options.binary_location = path
-            if config.hide_controls: options.add_argument(f"--app={url}")
+            # You MUST use uc.ChromeOptions(), standard ChromeOptions won't pass stealth
+            options = uc.ChromeOptions()
             
-            options.add_argument("--disable-web-security")
-            options.add_argument("--allow-running-insecure-content") 
+            # The 'uc' package handles hiding the automation. We only need to configure the UI.
             options.add_argument(f"--user-data-dir={user_data_path}") 
             
-            if config.start_maximized: options.add_argument("--start-maximized")
-            else: options.add_argument(f"--window-size={config.width},{config.height}")
+            if config.hide_controls: 
+                options.add_argument(f"--app={url}")
             
-            options.add_experimental_option("excludeSwitches", ["enable-automation"])
+            if config.start_maximized: 
+                options.add_argument("--start-maximized")
+            else: 
+                options.add_argument(f"--window-size={config.width},{config.height}")
             
-            driver = webdriver.Edge(options=options) if is_edge else webdriver.Chrome(options=options)
+            # Note: For Edge/Brave, passing the executable path allows uc to spoof Chrome 
+            # while visually launching Edge.
+            driver = uc.Chrome(
+                options=options,
+                browser_executable_path=path if path else None,
+            )
 
         # --- FIREFOX ---
         elif browser == Browser.Firefox:
-            # Apply UI hacks to the profile directory (temp or persistent)
             cls._apply_firefox_ui_hacks(user_data_path, config.hide_controls)
 
-            options = webdriver.FirefoxOptions()
-            if path: options.binary_location = path
+            options = FirefoxOptions()
+            if path: 
+                options.binary_location = path
             
             options.add_argument("-profile")
             options.add_argument(user_data_path)
             
-            # 1. Disable the "webdriver" flag so Google doesn't see it's a bot
-            options.set_preference("dom.webdriver.enabled", False)
-            options.set_preference('useAutomationExtension', False)
-            
-            # 2. Set a real-looking User Agent (Google often blocks default Selenium UA)
-            options.set_preference("general.useragent.override", "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:124.0) Gecko/20100101 Firefox/124.0")
-            
-            # 3. Disable side-channel detections
-            options.set_preference("privacy.trackingprotection.enabled", False)
-
+            # Apply your UI hacks
             options.set_preference("toolkit.legacyUserProfileCustomizations.stylesheets", True)
             options.set_preference("browser.tabs.inTitlebar", 0)
 
-            if config.kiosk: options.add_argument("--kiosk")
+            if config.kiosk: 
+                options.add_argument("--kiosk")
             
-            driver = webdriver.Firefox(options=options)
+            # UCFirefox acts as a drop-in replacement for standard webdriver.Firefox
+            # It natively patches geckodriver strings to bypass BotGuard checks
+            driver = UCFirefox(options=options)
+            
             if not config.start_maximized:
                 driver.set_window_size(config.width, config.height)
 
-        if driver:
+        if driver is not None:
             # Patch connection pool to avoid warnings during heavy JS-Python traffic
             try:
                 executor = driver.command_executor
