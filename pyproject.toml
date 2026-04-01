@@ -4,14 +4,14 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "shellac-webview"
-version = "1.4.0"
+version = "1.5.0"
 description = ""
 readme = "README.md"
 requires-python = ">=3.8"
 authors = [
   { name = "Sharkow1743", email = "Sharkow1743@users.noreply.github.com" }
 ]
-dependencies = ["fastapi", "uvicorn", "pydantic", "selenium"]
+dependencies = ["fastapi", "uvicorn", "pydantic", "selenium", "undetected-chromedriver", "undetected-geckodriver-lw", "setuptools"]
 
 [project.urls]
 "Homepage" = "https://github.com/Sharkow1743/shellac-webview"
