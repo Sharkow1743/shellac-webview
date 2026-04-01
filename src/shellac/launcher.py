@@ -110,8 +110,17 @@ class BrowserLauncher:
             
             options.add_argument("-profile")
             options.add_argument(user_data_path)
+            
+            # 1. Disable the "webdriver" flag so Google doesn't see it's a bot
+            options.set_preference("dom.webdriver.enabled", False)
+            options.set_preference('useAutomationExtension', False)
+            
+            # 2. Set a real-looking User Agent (Google often blocks default Selenium UA)
+            options.set_preference("general.useragent.override", "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:124.0) Gecko/20100101 Firefox/124.0")
+            
+            # 3. Disable side-channel detections
+            options.set_preference("privacy.trackingprotection.enabled", False)
 
-            # Redundant but safe: ensure preference is set for this session
             options.set_preference("toolkit.legacyUserProfileCustomizations.stylesheets", True)
             options.set_preference("browser.tabs.inTitlebar", 0)
 
