@@ -14,14 +14,15 @@ from selenium import webdriver
 from selenium.common.exceptions import WebDriverException, NoSuchWindowException, InvalidSessionIdException
 
 from .enums import Browser
-from .models import WindowConfig
+from .models import WindowConfig, Event
 from .launcher import BrowserLauncher
 
 log = logging.getLogger('shellac')
 
+
 class Window:
     """
-    Represents a WebUI window instance that manages a FastAPI backend 
+    Represents a WebUI window instance that manages a FastAPI backend
     and a Selenium-controlled browser frontend.
     """
 
@@ -31,6 +32,7 @@ class Window:
         self.port = self._get_free_port()
         self.app = FastAPI()
         self.bindings: Dict[str, Callable] = {}
+        self._event_bindings: Dict[str, Dict[str, str]] = {}  # {event: {selector: callback_name}}
         self._html_content: Optional[str] = None
         self.driver: Optional[webdriver.Remote] = None
         self._running = False
@@ -42,9 +44,51 @@ class Window:
             s.bind(('', 0))
             return s.getsockname()[1]
 
+    def _get_event_bindings_js(self) -> str:
+        """Returns JavaScript that sets up all registered DOM event listeners."""
+        if not self._event_bindings:
+            return ""
+
+        js_lines = []
+        for event, selectors in self._event_bindings.items():
+            for selector, fn_name in selectors.items():
+                # Use event delegation to support dynamic content
+                safe_selector = selector.replace("'", "\\'")
+                js_lines.append(f"""
+                (function() {{
+                    const eventType = '{event}';
+                    const targetSelector = '{safe_selector}';
+                    const handlerName = '{fn_name}';
+                    const handler = function(e) {{
+                        let target = e.target;
+                        // Climb up to the matching selector if needed
+                        if (!target.matches(targetSelector)) {{
+                            target = target.closest(targetSelector);
+                        }}
+                        if (target) {{
+                            const eventData = {{
+                                type: e.type,
+                                target: target.tagName,
+                                id: target.id,
+                                className: target.className,
+                                value: target.value,
+                                checked: target.checked,
+                                data: e.detail || null
+                            }};
+                            window.webui.call(handlerName, eventData, target.innerText);
+                        }}
+                    }};
+                    document.addEventListener(eventType, handler);
+                    // Store handler for potential cleanup (optional)
+                    window._webui_handlers = window._webui_handlers || {{}};
+                    window._webui_handlers[eventType + '_' + targetSelector] = handler;
+                }})();
+                """)
+        return "\n".join(js_lines)
+
     def _get_bridge_js(self) -> str:
-        """Returns the JavaScript bridge code for Python-JS communication."""
-        return """
+        """Returns the JavaScript bridge code for Python-JS communication, including event bindings."""
+        base_js = """
         if (typeof window.webui === 'undefined') {
             window._webui_queue = [];
             window._webui_promises = {};
@@ -66,6 +110,17 @@ class Window:
             };
         }
         """
+        event_setup = self._get_event_bindings_js()
+        if event_setup:
+            # Wait for DOM to be ready before attaching event listeners
+            event_setup = f"""
+            if (document.readyState === 'loading') {{
+                document.addEventListener('DOMContentLoaded', () => {{ {event_setup} }});
+            }} else {{
+                {event_setup}
+            }}
+            """
+        return base_js + event_setup
 
     def _setup_routes(self):
         """Configures the internal FastAPI routes."""
@@ -90,9 +145,9 @@ class Window:
                     raise ValueError(f"Cannot auto-instantiate class '{target.__name__}'.") from e
             else:
                 obj = target
-                
+
             for name in dir(obj):
-                if not name.startswith('_'): 
+                if not name.startswith('_'):
                     attr = getattr(obj, name)
                     if callable(attr):
                         bind_name = f"{prefix}.{name}" if prefix else name
@@ -110,14 +165,14 @@ class Window:
                     )
                     if not exists:
                         self.driver.execute_script(self._get_bridge_js())
-                    
+
                     # Get queue
                     events = self.driver.execute_script("""
                         var e = window._webui_queue; 
                         window._webui_queue = []; 
                         return e;
                     """)
-                    
+
                     for event_data in (events or []):
                         fn_name = event_data.get('fn')
                         call_id = event_data.get('id')
@@ -125,10 +180,10 @@ class Window:
 
                         if fn_name in self.bindings:
                             cb = self.bindings[fn_name]
-                            
+
                             sig = inspect.signature(cb)
                             params = list(sig.parameters.values())
-                            
+
                             # Find out if function accepts `Event` or not
                             wants_event = False
                             if params:
@@ -137,7 +192,6 @@ class Window:
                                 wants_event = is_event_type or is_event_name
 
                             try:
-                                # 4. Prepare the execution call
                                 if wants_event:
                                     event_obj = Event(window=self, element=fn_name, data=js_args)
                                     if len(params) == 1:
@@ -148,18 +202,15 @@ class Window:
                                     target_args = tuple(js_args)
 
                                 if inspect.iscoroutinefunction(cb):
-                                    # Run async function
                                     result = asyncio.run(cb(*target_args))
                                 else:
                                     result = cb(*target_args)
-                                
-                                # Return result
+
                                 result_json = json.dumps(result)
                                 self.driver.execute_script(f"window._webui_resolve({call_id}, {result_json});")
-                                
+
                             except Exception as e:
                                 log.exception(f"Call to '{fn_name}' failed: {e}")
-                                # Return null
                                 self.driver.execute_script(f"window._webui_resolve({call_id}, null);")
                 except InvalidSessionIdException:
                     log.debug("Browser session ended, stopping bridge monitor")
@@ -169,7 +220,7 @@ class Window:
                     log.debug("Error in bridge monitor loop", exc_info=True)
 
             time.sleep(0.1)
-            
+
     def bind(self, name_or_target: Union[str, Any] = None, target: Optional[Any] = None):
         """
         Binds a Python function, class, or instance to be callable from JavaScript.
@@ -195,19 +246,47 @@ class Window:
             is_func = inspect.isfunction(target) or inspect.ismethod(target)
             self._bind_target(target, prefix=name_or_target, exact_name=is_func)
             return target
-            
+
         if isinstance(name_or_target, str) and target is None:
             def decorator(decor_target: Any):
                 is_func = inspect.isfunction(decor_target) or inspect.ismethod(decor_target)
                 self._bind_target(decor_target, prefix=name_or_target, exact_name=is_func)
                 return decor_target
             return decorator
-            
+
         if name_or_target is not None:
             self._bind_target(name_or_target, exact_name=False)
             return name_or_target
-            
+
         return self
+
+    def on(self, event: str, selector: str):
+        """
+        Decorator to bind a DOM event on elements matching a CSS selector to a Python function.
+
+        The decorated function receives an Event object (or two args: event_data, textContent).
+
+        Args:
+            event (str): DOM event name (e.g., 'click', 'load', 'input').
+            selector (str): CSS selector to match target elements.
+
+        Returns:
+            Callable: The decorator that registers the function.
+
+        Example:
+            >>> @win.on("click", "#myButton")
+            ... def handle_click(event_data, text):
+            ...     print(f"Button clicked! Text: {text}")
+        """
+        def decorator(func: Callable):
+            # Register the function so it can be called from JS
+            self.bind(func)  # uses func.__name__ as the key
+            fn_name = func.__name__
+            if event not in self._event_bindings:
+                self._event_bindings[event] = {}
+            self._event_bindings[event][selector] = fn_name
+            return func
+        return decorator
 
     def navigate(self, url_or_html: str):
         """
@@ -219,7 +298,7 @@ class Window:
         if self.driver is None:
             log.warning("Cannot navigate: driver is not initialized")
             return
-            
+
         is_url = url_or_html.startswith(('http://', 'https://', 'file://'))
         if is_url:
             self.driver.get(url_or_html)
@@ -236,7 +315,7 @@ class Window:
             except OSError as e:
                 log.error(f"Failed to read HTML file: {e}")
                 self._html_content = url_or_html
-                
+
             self.driver.get(f"http://127.0.0.1:{self.port}/")
 
     def run_js(self, script: str) -> Any:
@@ -298,7 +377,7 @@ class Window:
             bool: True if running, False otherwise.
         """
         return self._running
-    
+
     def get_url(self) -> str:
         """Returns the current URL of the browser."""
         return self.driver.current_url if self.driver else ""
@@ -374,8 +453,8 @@ class Window:
             log.debug(f"Using URL: {url}")
 
         threading.Thread(target=uvicorn.run, args=(self.app,),
-                        kwargs={"host": "127.0.0.1", "port": self.port, "log_level": "error"},
-                        daemon=True).start()
+                         kwargs={"host": "127.0.0.1", "port": self.port, "log_level": "error"},
+                         daemon=True).start()
         log.debug(f"FastAPI server started on port {self.port}")
 
         target = browser
