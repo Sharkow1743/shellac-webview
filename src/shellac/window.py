@@ -5,9 +5,8 @@ import socket
 import threading
 import time
 from typing import Any, Callable, Dict, Optional, Union
-import asyncio
+import logging
 
-import urllib3
 import uvicorn
 from fastapi import FastAPI
 from fastapi.responses import HTMLResponse
@@ -17,6 +16,8 @@ from selenium.common.exceptions import WebDriverException, NoSuchWindowException
 from .enums import Browser
 from .models import WindowConfig, Event
 from .launcher import BrowserLauncher
+
+log = logging.getLogger('shellac')
 
 class Window:
     """
@@ -104,14 +105,13 @@ class Window:
         while self._running:
             if self.driver is not None:
                 try:
-                    # 1. Check if the bridge is initialized in the browser
                     exists = self.driver.execute_script(
                         "return (typeof window.webui !== 'undefined' && typeof window._webui_resolve !== 'undefined');"
                     )
                     if not exists:
                         self.driver.execute_script(self._get_bridge_js())
                     
-                    # 2. Collect pending calls from the JavaScript queue
+                    # Get queue
                     events = self.driver.execute_script("""
                         var e = window._webui_queue; 
                         window._webui_queue = []; 
@@ -126,14 +126,12 @@ class Window:
                         if fn_name in self.bindings:
                             cb = self.bindings[fn_name]
                             
-                            # 3. Inspect the Python function signature
                             sig = inspect.signature(cb)
                             params = list(sig.parameters.values())
                             
-                            # Determine if the function wants the Shellac 'Event' object
+                            # Find out if function accepts `Event` or not
                             wants_event = False
                             if params:
-                                # We check if 1st arg is named 'event' or typed as 'Event'
                                 is_event_type = params[0].annotation is Event
                                 is_event_name = params[0].name == 'event'
                                 wants_event = is_event_type or is_event_name
@@ -142,41 +140,31 @@ class Window:
                                 # 4. Prepare the execution call
                                 if wants_event:
                                     event_obj = Event(window=self, element=fn_name, data=js_args)
-                                    # If function only takes (event), don't unpack JS args
                                     if len(params) == 1:
                                         target_args = (event_obj,)
                                     else:
                                         target_args = (event_obj, *js_args)
                                 else:
-                                    # Standard function: just pass the JS arguments
                                     target_args = tuple(js_args)
 
-                                # 5. Execute (Handle Async vs Sync)
                                 if inspect.iscoroutinefunction(cb):
-                                    # Run async function in a temporary event loop
+                                    # Run async function
                                     result = asyncio.run(cb(*target_args))
                                 else:
-                                    # Run standard function
                                     result = cb(*target_args)
                                 
-                                # 6. Return the result to JavaScript
+                                # Return result
                                 result_json = json.dumps(result)
                                 self.driver.execute_script(f"window._webui_resolve({call_id}, {result_json});")
                                 
                             except Exception as e:
-                                # Log the error for the developer
-                                print(f"[Shellac Error] Call to '{fn_name}' failed: {e}")
-                                import traceback
-                                traceback.print_exc()
-                                
-                                # Inform JS that the call failed
+                                log.exception(f"Call to '{fn_name}' failed: {e}")
+                                # Return null
                                 self.driver.execute_script(f"window._webui_resolve({call_id}, null);")
                             
                 except Exception:
-                    # Catch broad driver/poll errors silently to keep the thread alive
-                    pass
-            
-            # Polling frequency (50ms is good for UI responsiveness)
+                    log.debug("Error in bridge monitor loop", exc_info=True)
+
             time.sleep(0.1)
             
     def bind(self, name_or_target: Union[str, Any] = None, target: Optional[Any] = None):
@@ -223,23 +211,27 @@ class Window:
         Navigates the current window to a new URL, a local file, or raw HTML content.
 
         Args:
-            url_or_html (str): A web URL (http://...), a path to a .html file, 
-                or a raw HTML string.
+            url_or_html (str): A web URL (http://...), a path to a .html file, or a raw HTML string.
         """
         if self.driver is None:
+            log.warning("Cannot navigate: driver is not initialized")
             return
             
         is_url = url_or_html.startswith(('http://', 'https://', 'file://'))
         if is_url:
             self.driver.get(url_or_html)
+            log.debug(f"Navigated to URL: {url_or_html}")
         else:
             try:
                 if len(url_or_html) < 1000 and os.path.exists(url_or_html):
                     with open(url_or_html, 'r', encoding='utf-8') as f:
                         self._html_content = f.read()
+                    log.debug(f"Loaded HTML file: {url_or_html}")
                 else:
                     self._html_content = url_or_html
-            except OSError:
+                    log.debug("Set raw HTML content")
+            except OSError as e:
+                log.error(f"Failed to read HTML file: {e}")
                 self._html_content = url_or_html
                 
             self.driver.get(f"http://127.0.0.1:{self.port}/")
@@ -255,16 +247,21 @@ class Window:
             Any: The result returned by the JavaScript execution.
         """
         if self.driver is not None:
-            try: return self.driver.execute_script(script)
-            except Exception as e: print(f"[WebUI] JS Execution Error: {e}")
+            try:
+                return self.driver.execute_script(script)
+            except Exception as e:
+                log.error(f"JS Execution Error: {e}")
         return None
 
     def close(self):
         """Closes the browser window and shuts down the backend server."""
         self._running = False
         if self.driver is not None:
-            try: self.driver.quit()
-            except Exception: pass
+            try:
+                self.driver.quit()
+                log.debug("Browser driver closed")
+            except Exception as e:
+                log.error(f"Error while closing driver: {e}")
             self.driver = None
 
     def set_size(self, width: int, height: int):
@@ -277,7 +274,9 @@ class Window:
         """
         self.config.width = width
         self.config.height = height
-        if self.driver is not None: self.driver.set_window_size(width, height)
+        if self.driver is not None:
+            self.driver.set_window_size(width, height)
+            log.debug(f"Window resized to {width}x{height}")
 
     def set_title(self, title: str):
         """
@@ -305,27 +304,25 @@ class Window:
         """Reloads the current page."""
         if self.driver is not None:
             self.driver.refresh()
+            log.debug("Page reloaded")
 
     def maximize(self):
         """Maximizes the window."""
         if self.driver is not None:
             self.driver.maximize_window()
+            log.debug("Window maximized")
 
     def minimize(self):
         """Minimizes the window."""
         if self.driver is not None:
             self.driver.minimize_window()
+            log.debug("Window minimized")
 
     def get_size(self) -> Dict[str, int]:
         """Returns the current window dimensions."""
         if self.driver is not None:
             return self.driver.get_window_size()
         return {"width": self.config.width, "height": self.config.height}
-
-    def set_always_on_top(self, enabled: bool = True):
-        """Note: Selenium doesn't support this natively across all OS, 
-        but we can execute a script or suggest using a wrapper."""
-        print("[Shellac] Always-on-top is not natively supported by Selenium drivers.")
 
     def run_js_async(self, script: str):
         """Executes JavaScript without waiting for a return value."""
@@ -336,12 +333,12 @@ class Window:
         """Moves the window to the specified coordinates."""
         if self.driver is not None:
             self.driver.set_window_position(x, y)
+            log.debug(f"Window moved to ({x}, {y})")
 
     def get_position(self) -> Dict[str, int]:
         """Returns the window position."""
         return self.driver.get_window_position() if self.driver else {"x": 0, "y": 0}
 
-    # Example of a new developer-friendly alert helper
     def alert(self, message: str):
         """Shows a native browser alert."""
         self.run_js(f"alert({json.dumps(message)});")
@@ -359,17 +356,24 @@ class Window:
         if not is_url:
             try:
                 if len(content) < 1000 and os.path.exists(content):
-                    with open(content, 'r', encoding='utf-8') as f: self._html_content = f.read()
-                else: self._html_content = content
-            except OSError:
+                    with open(content, 'r', encoding='utf-8') as f:
+                        self._html_content = f.read()
+                    log.debug(f"Loaded HTML content from file: {content}")
+                else:
+                    self._html_content = content
+                    log.debug("Set raw HTML content")
+            except OSError as e:
+                log.error(f"Failed to read HTML file: {e}")
                 self._html_content = content
             url = f"http://127.0.0.1:{self.port}/"
         else:
             url = content
+            log.debug(f"Using URL: {url}")
 
-        threading.Thread(target=uvicorn.run, args=(self.app,), 
-                        kwargs={"host": "127.0.0.1", "port": self.port, "log_level": "error"}, 
+        threading.Thread(target=uvicorn.run, args=(self.app,),
+                        kwargs={"host": "127.0.0.1", "port": self.port, "log_level": "error"},
                         daemon=True).start()
+        log.debug(f"FastAPI server started on port {self.port}")
 
         target = browser
         if target == Browser.AnyBrowser:
@@ -377,9 +381,11 @@ class Window:
                 if BrowserLauncher.get_path(b):
                     target = b
                     break
+            log.debug(f"Auto-selected browser: {target}")
 
         self.driver = BrowserLauncher.create_driver(target, url, self.config)
         self.driver.get(url)
+        log.info(f"Browser launched with {target}")
         threading.Thread(target=self._bridge_monitor, daemon=True).start()
 
     def wait(self):
@@ -392,8 +398,10 @@ class Window:
                     try:
                         _ = self.driver.window_handles
                     except (NoSuchWindowException, WebDriverException):
+                        log.debug("Browser window closed")
                         break
                 time.sleep(2)
-        except KeyboardInterrupt: pass
+        except KeyboardInterrupt:
+            log.info("Interrupted by user")
         finally:
             self.close()
