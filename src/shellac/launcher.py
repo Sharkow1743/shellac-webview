@@ -7,6 +7,7 @@ from typing import Optional
 
 from selenium import webdriver
 from selenium.webdriver.firefox.options import Options as FirefoxOptions
+from selenium.webdriver.common.desired_capabilities import DesiredCapabilities
 
 import undetected_chromedriver as uc
 from undetected_geckodriver import Firefox as UCFirefox
@@ -101,11 +102,13 @@ class BrowserLauncher:
             else: 
                 options.add_argument(f"--window-size={config.width},{config.height}")
             
-            # Note: For Edge/Brave, passing the executable path allows uc to spoof Chrome 
-            # while visually launching Edge.
+            caps = DesiredCapabilities.CHROME.copy()
+            caps['pageLoadStrategy'] = 'eager'
+
             driver = uc.Chrome(
                 options=options,
                 browser_executable_path=path if path else None,
+                desired_capabilities=caps,   # <-- added
             )
 
         # --- FIREFOX ---
@@ -122,6 +125,7 @@ class BrowserLauncher:
             # Apply your UI hacks
             options.set_preference("toolkit.legacyUserProfileCustomizations.stylesheets", True)
             options.set_preference("browser.tabs.inTitlebar", 0)
+            options.set_preference("webdriver.load.strategy", "eager")
 
             if config.kiosk: 
                 options.add_argument("--kiosk")
