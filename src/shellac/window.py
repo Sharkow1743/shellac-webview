@@ -11,10 +11,10 @@ import uvicorn
 from fastapi import FastAPI
 from fastapi.responses import HTMLResponse
 from selenium import webdriver
-from selenium.common.exceptions import WebDriverException, NoSuchWindowException
+from selenium.common.exceptions import WebDriverException, NoSuchWindowException, InvalidSessionIdException
 
 from .enums import Browser
-from .models import WindowConfig, Event
+from .models import WindowConfig
 from .launcher import BrowserLauncher
 
 log = logging.getLogger('shellac')
@@ -161,7 +161,10 @@ class Window:
                                 log.exception(f"Call to '{fn_name}' failed: {e}")
                                 # Return null
                                 self.driver.execute_script(f"window._webui_resolve({call_id}, null);")
-                            
+                except InvalidSessionIdException:
+                    log.debug("Browser session ended, stopping bridge monitor")
+                    self._running = False
+                    break
                 except Exception:
                     log.debug("Error in bridge monitor loop", exc_info=True)
 
@@ -385,7 +388,7 @@ class Window:
 
         self.driver = BrowserLauncher.create_driver(target, url, self.config)
         self.driver.get(url)
-        log.info(f"Browser launched with {target}")
+        log.info(f"Browser launched with {target.name}")
         threading.Thread(target=self._bridge_monitor, daemon=True).start()
 
     def wait(self):
