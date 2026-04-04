@@ -91,6 +91,9 @@ class BrowserLauncher:
             # You MUST use uc.ChromeOptions(), standard ChromeOptions won't pass stealth
             options = uc.ChromeOptions()
             
+            options.page_load_strategy = 'none'
+            options.set_capability('pageLoadStrategy', 'none')
+            
             # The 'uc' package handles hiding the automation. We only need to configure the UI.
             options.add_argument(f"--user-data-dir={user_data_path}") 
             
@@ -101,14 +104,10 @@ class BrowserLauncher:
                 options.add_argument("--start-maximized")
             else: 
                 options.add_argument(f"--window-size={config.width},{config.height}")
-            
-            caps = DesiredCapabilities.CHROME.copy()
-            caps['pageLoadStrategy'] = 'eager'
 
             driver = uc.Chrome(
                 options=options,
                 browser_executable_path=path if path else None,
-                desired_capabilities=caps,   # <-- added
             )
 
         # --- FIREFOX ---
@@ -125,7 +124,8 @@ class BrowserLauncher:
             # Apply your UI hacks
             options.set_preference("toolkit.legacyUserProfileCustomizations.stylesheets", True)
             options.set_preference("browser.tabs.inTitlebar", 0)
-            options.set_preference("webdriver.load.strategy", "eager")
+            options.set_capability('pageLoadStrategy', 'none')
+            options.set_preference("webdriver.load.strategy", "none")
 
             if config.kiosk: 
                 options.add_argument("--kiosk")
