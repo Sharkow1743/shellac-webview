@@ -88,14 +88,14 @@ class BrowserLauncher:
         # --- CHROMIUM (Chrome, Edge, Brave, Vivaldi) ---
         if browser in[Browser.Chrome, Browser.Edge, Browser.Chromium, Browser.Brave, Browser.Vivaldi]:
             
-            # You MUST use uc.ChromeOptions(), standard ChromeOptions won't pass stealth
             options = uc.ChromeOptions()
             
             options.page_load_strategy = 'none'
             options.set_capability('pageLoadStrategy', 'none')
             
-            # The 'uc' package handles hiding the automation. We only need to configure the UI.
             options.add_argument(f"--user-data-dir={user_data_path}") 
+            
+            options.add_argument(f"--class={config.app_name}")
             
             if config.hide_controls: 
                 options.add_argument(f"--app={url}")
@@ -117,6 +117,9 @@ class BrowserLauncher:
             options = FirefoxOptions()
             if path: 
                 options.binary_location = path
+                
+            options.add_argument(f"--class={config.app_name}")
+            options.add_argument(f"--name={config.app_name}")
             
             options.add_argument("-profile")
             options.add_argument(user_data_path)

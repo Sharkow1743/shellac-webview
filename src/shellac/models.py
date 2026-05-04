@@ -8,6 +8,8 @@ class WindowConfig(BaseModel):
     kiosk: bool = False
     data_dir: Optional[str] = None
     start_maximized: bool = False
+    app_name: str = "App"
+    icon_path: Optional[str] = None
 
 class Event(BaseModel):
     model_config = ConfigDict(arbitrary_types_allowed=True)

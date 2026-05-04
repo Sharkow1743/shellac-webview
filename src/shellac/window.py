@@ -1,11 +1,14 @@
+import base64
 import inspect
 import json
 import os
+import platform
 import socket
 import threading
 import time
 from typing import Any, Callable, Dict, Optional, Union
 import logging
+import ctypes
 
 import uvicorn
 from fastapi import FastAPI
@@ -128,9 +131,14 @@ class Window:
         async def index():
             content = self._html_content or "<html><body>No Content</body></html>"
             bridge = f"<script>{self._get_bridge_js()}</script>"
+            favicon = self._get_favicon_html()
+            
+            injection = f"{favicon}\n{bridge}"
             if "<head>" in content:
-                return HTMLResponse(content.replace("<head>", f"<head>{bridge}"))
-            return HTMLResponse(bridge + content)
+                return HTMLResponse(content.replace("<head>", f"<head>\n{injection}"))
+            elif "<html>" in content:
+                return HTMLResponse(content.replace("<html>", f"<html>\n<head>{injection}</head>"))
+            return HTMLResponse(f"<html><head>{injection}</head>\n<body>{content}</body></html>")
 
     def _bind_target(self, target: Any, prefix: str = "", exact_name: bool = False):
         """Internal helper to map functions or class methods to the registry."""
@@ -220,6 +228,72 @@ class Window:
                     log.debug("Error in bridge monitor loop", exc_info=True)
 
             time.sleep(0.1)
+            
+    def _get_favicon_html(self) -> str:
+        """Reads the local icon and creates a base64 HTML tag for Chromium extraction."""
+        if not self.config.icon_path or not os.path.exists(self.config.icon_path):
+            return ""
+        
+        try:
+            with open(self.config.icon_path, "rb") as f:
+                encoded = base64.b64encode(f.read()).decode("utf-8")
+            
+            ext = self.config.icon_path.lower().split('.')[-1]
+            mime_types = {
+                "png": "image/png", "ico": "image/x-icon", 
+                "jpg": "image/jpeg", "jpeg": "image/jpeg", "svg": "image/svg+xml"
+            }
+            mime = mime_types.get(ext, "image/png")
+            return f'<link rel="icon" type="{mime}" href="data:{mime};base64,{encoded}">'
+        except Exception as e:
+            log.warning(f"Failed to load icon: {e}")
+            return ""
+
+    def _apply_windows_native_hacks(self):
+        """Uses ctypes to forcibly inject the icon and separate taskbar grouping on Windows."""
+        if platform.system() != "Windows" or not self.config.icon_path:
+            return
+            
+        if not self.config.icon_path.endswith('.ico'):
+            log.warning("Windows native icon replacement requires a .ico file format.")
+            return
+
+        def inject_native_icon():
+            hwnd = 0
+            # Wait for the browser window to appear
+            for _ in range(50):
+                if self.driver and self.driver.title:
+                    hwnd = ctypes.windll.user32.FindWindowW(None, self.driver.title)
+                    if hwnd: break
+                time.sleep(0.1)
+                
+            if not hwnd:
+                return
+
+            try:
+                # Load the .ico file
+                LR_LOADFROMFILE = 0x0010
+                IMAGE_ICON = 1
+                WM_SETICON = 0x0080
+                ICON_BIG = 1
+                ICON_SMALL = 0
+                
+                hicon = ctypes.windll.user32.LoadImageW(
+                    0, self.config.icon_path, IMAGE_ICON, 0, 0, LR_LOADFROMFILE
+                )
+                
+                # Forcibly overwrite the browser's Windows handle icon
+                if hicon:
+                    ctypes.windll.user32.SendMessageW(hwnd, WM_SETICON, ICON_BIG, hicon)
+                    ctypes.windll.user32.SendMessageW(hwnd, WM_SETICON, ICON_SMALL, hicon)
+            except Exception as e:
+                log.debug(f"Failed to set Windows native icon: {e}")
+
+        threading.Thread(target=inject_native_icon, daemon=True).start()
+            
+            
+            
+    # ======== PUBLIC METHODS ========
 
     def bind(self, name_or_target: Union[str, Any] = None, target: Optional[Any] = None):
         """
@@ -468,6 +542,7 @@ class Window:
         self.driver = BrowserLauncher.create_driver(target, url, self.config)
         self.driver.get(url)
         log.info(f"Browser launched with {target.name}")
+        self._apply_windows_native_hacks()
         threading.Thread(target=self._bridge_monitor, daemon=True).start()
 
     def wait(self):
