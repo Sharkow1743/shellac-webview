@@ -1,25 +1,30 @@
 import base64
+import ctypes
 import inspect
 import json
 import os
-import platform
 import socket
 import threading
 import time
+import platform
+from pathlib import Path
 from typing import Any, Callable, Dict, Optional, Union
 import logging
-import ctypes
 
 import uvicorn
 from fastapi import FastAPI
 from fastapi.responses import HTMLResponse
 from selenium import webdriver
-from selenium.common.exceptions import WebDriverException, NoSuchWindowException, InvalidSessionIdException
+from selenium.common.exceptions import (
+    WebDriverException, 
+    NoSuchWindowException, 
+    InvalidSessionIdException,
+    UnexpectedAlertPresentException
+)
 
 from .enums import Browser
 from .models import WindowConfig, Event
 from .launcher import BrowserLauncher
-
 log = logging.getLogger('shellac')
 
 
@@ -39,6 +44,9 @@ class Window:
         self._html_content: Optional[str] = None
         self.driver: Optional[webdriver.Remote] = None
         self._running = False
+        self._on_load_callbacks =[]
+        self.bind("__shellac_dom_loaded", self._handle_on_load)
+        
         self._setup_routes()
 
     def _get_free_port(self) -> int:
@@ -114,16 +122,18 @@ class Window:
         }
         """
         event_setup = self._get_event_bindings_js()
-        if event_setup:
-            # Wait for DOM to be ready before attaching event listeners
-            event_setup = f"""
-            if (document.readyState === 'loading') {{
-                document.addEventListener('DOMContentLoaded', () => {{ {event_setup} }});
-            }} else {{
-                {event_setup}
-            }}
-            """
-        return base_js + event_setup
+        
+        return base_js + f"""
+        if (document.readyState === 'loading') {{
+            document.addEventListener('DOMContentLoaded', () => {{ 
+                {event_setup} 
+                window.webui.call('__shellac_dom_loaded');
+            }});
+        }} else {{
+            {event_setup}
+            window.webui.call('__shellac_dom_loaded');
+        }}
+        """
 
     def _setup_routes(self):
         """Configures the internal FastAPI routes."""
@@ -194,21 +204,29 @@ class Window:
 
                             # Find out if function accepts `Event` or not
                             wants_event = False
+                            has_var_args = False
                             if params:
                                 is_event_type = params[0].annotation is Event
                                 is_event_name = params[0].name == 'event'
                                 wants_event = is_event_type or is_event_name
+                                # Check if function accepts *args
+                                has_var_args = any(p.kind == inspect.Parameter.VAR_POSITIONAL for p in params)
 
                             try:
+                                # 1. Prepare all available arguments
                                 if wants_event:
                                     event_obj = Event(window=self, element=fn_name, data=js_args)
-                                    if len(params) == 1:
-                                        target_args = (event_obj,)
-                                    else:
-                                        target_args = (event_obj, *js_args)
+                                    target_args = [event_obj] + js_args
                                 else:
-                                    target_args = tuple(js_args)
+                                    target_args = js_args
+                                
+                                # 2. Trim to match exact parameter count (unless *args is used)
+                                if not has_var_args:
+                                    target_args = target_args[:len(params)]
+                                
+                                target_args = tuple(target_args)
 
+                                # 3. Execute the function
                                 if inspect.iscoroutinefunction(cb):
                                     result = asyncio.run(cb(*target_args))
                                 else:
@@ -220,6 +238,9 @@ class Window:
                             except Exception as e:
                                 log.exception(f"Call to '{fn_name}' failed: {e}")
                                 self.driver.execute_script(f"window._webui_resolve({call_id}, null);")
+                except UnexpectedAlertPresentException:
+                    time.sleep(0.5)
+                    continue
                 except InvalidSessionIdException:
                     log.debug("Browser session ended, stopping bridge monitor")
                     self._running = False
@@ -290,6 +311,36 @@ class Window:
                 log.debug(f"Failed to set Windows native icon: {e}")
 
         threading.Thread(target=inject_native_icon, daemon=True).start()
+        
+    def _handle_on_load(self):
+        """Internal handler called by JS when DOM is loaded."""
+        for cb in self._on_load_callbacks:
+            cb()
+            
+    def _apply_linux_wayland_hacks(self):
+        """Generates a temporary .desktop file so Wayland strictly maps the icon and group."""
+        if platform.system() != "Linux" or not self.config.icon_path:
+            return
+            
+        try:
+            app_name = self.config.app_name
+            abs_icon = str(Path(self.config.icon_path).absolute())
+            
+            desktop_dir = Path.home() / ".local" / "share" / "applications"
+            desktop_dir.mkdir(parents=True, exist_ok=True)
+            
+            desktop_file = desktop_dir / f"{app_name}.desktop"
+            
+            desktop_content = f"""[Desktop Entry]
+Name={app_name}
+Exec=env {app_name}
+Icon={abs_icon}
+Type=Application
+StartupWMClass={app_name}
+"""
+            desktop_file.write_text(desktop_content)
+        except Exception as e:
+            log.warning(f"Failed to apply Wayland icon hack: {e}")
             
             
             
@@ -405,6 +456,8 @@ class Window:
         if self.driver is not None:
             try:
                 return self.driver.execute_script(script)
+            except UnexpectedAlertPresentException:
+                pass
             except Exception as e:
                 log.error(f"JS Execution Error: {e}")
         return None
@@ -453,8 +506,7 @@ class Window:
         return self._running
 
     def get_url(self) -> str:
-        """Returns the current URL of the browser."""
-        return self.driver.current_url if self.driver else ""
+        return self.driver.current_url if self.driver is not None else ""
 
     def reload(self):
         """Reloads the current page."""
@@ -492,8 +544,7 @@ class Window:
             log.debug(f"Window moved to ({x}, {y})")
 
     def get_position(self) -> Dict[str, int]:
-        """Returns the window position."""
-        return self.driver.get_window_position() if self.driver else {"x": 0, "y": 0}
+        return self.driver.get_window_position() if self.driver is not None else {"x": 0, "y": 0}
 
     def alert(self, message: str):
         """Shows a native browser alert."""
@@ -542,7 +593,12 @@ class Window:
         self.driver = BrowserLauncher.create_driver(target, url, self.config)
         self.driver.get(url)
         log.info(f"Browser launched with {target.name}")
-        self._apply_windows_native_hacks()
+        
+        if platform.system() == "Windows":
+            self._apply_windows_native_hacks()
+        elif platform.system() == "Linux":
+            self._apply_linux_wayland_hacks()
+            
         threading.Thread(target=self._bridge_monitor, daemon=True).start()
 
     def wait(self):
@@ -562,3 +618,16 @@ class Window:
             log.info("Interrupted by user")
         finally:
             self.close()
+            
+    def on_load(self, func: Callable = None):
+        """
+        Decorator to register a Python function to execute when the 
+        DOM Content is loaded (before heavy images/media finish loading).
+        """
+        if func:
+            self._on_load_callbacks.append(func)
+            return func
+        def decorator(f):
+            self._on_load_callbacks.append(f)
+            return f
+        return decorator
